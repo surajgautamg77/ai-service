@@ -10,6 +10,7 @@ ROOT_EXCLUDE_ARRAY=(
     "$OUTPUT_FILE" # Always exclude the output file itself
     "export.md"
     "venv"
+    ".env"
     "package-lock.json"
 )
 

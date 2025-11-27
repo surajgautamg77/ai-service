@@ -1,5 +1,6 @@
 import config  # loads HF token
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse  # <--- Import this
 from schemas import PromptRequest, EmbedRequest
 from llm.llm_service import generate_llm_response
 from embeddings.embed_service import get_embedding
@@ -22,9 +23,15 @@ async def generate_text(request: PromptRequest):
             top_p=request.top_p,
         )
 
+        # Check if the service returned a safety error
+        if "error" in result:
+            # Return 400 Bad Request (or 403 Forbidden) explicitly
+            return JSONResponse(status_code=400, content=result)
+
         return result
 
     except Exception as e:
+        # This catches unexpected server crashes, not safety violations
         raise HTTPException(status_code=500, detail=str(e))
 
 
