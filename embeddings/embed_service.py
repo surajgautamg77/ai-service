@@ -1,27 +1,29 @@
 import torch
-from transformers import AutoTokenizer, AutoModel
+# Make sure you installed this: pip install sentence-transformers
+from sentence_transformers import SentenceTransformer
 
-NOMIC_MODEL = "nomic-ai/nomic-embed-text-v1.5"
+class EmbeddingService:
+    def __init__(self, model_id: str = "nomic-ai/nomic-embed-text-v1.5"):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Loading SentenceTransformer on {self.device}...")
+        
+        # trust_remote_code=True is required for Nomic
+        self.model = SentenceTransformer(model_id, trust_remote_code=True, device=self.device)
 
-embed_tokenizer = AutoTokenizer.from_pretrained(NOMIC_MODEL, trust_remote_code=True)
-embed_model = AutoModel.from_pretrained(NOMIC_MODEL, trust_remote_code=True)
+        self.prompts = {
+            "search_query": "search_query: ",
+            "search_document": "search_document: "
+        }
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-embed_model.to(device)
-embed_model.eval()
+    def generate(self, text: str, task_type: str = "search_query"):
+        prefix = self.prompts.get(task_type, "search_query: ")
+        text_with_prefix = prefix + text
 
+        # This handles tokenization, pooling, and normalization automatically
+        embedding = self.model.encode(
+            text_with_prefix, 
+            convert_to_tensor=False,
+            normalize_embeddings=True 
+        )
 
-def get_embedding(text: str):
-    inputs = embed_tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=8192
-    ).to(device)
-
-    with torch.no_grad():
-        outputs = embed_model(**inputs)
-
-    embedding = outputs.last_hidden_state.mean(dim=1)[0]
-    return embedding.cpu().tolist()
+        return embedding.tolist()

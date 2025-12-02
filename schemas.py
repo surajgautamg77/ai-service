@@ -1,4 +1,5 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 
 class PromptRequest(BaseModel):
     prompt: str
@@ -7,6 +8,9 @@ class PromptRequest(BaseModel):
     top_p: float = 0.9
     system_prompt: str | None = None
 
-
 class EmbedRequest(BaseModel):
-    text: str
+    text: str = Field(..., min_length=1)
+    
+    # "search_query" = Use this for your short/messy user questions
+    # "search_document" = Use this when saving clean text to your DB
+    task_type: Literal["search_document", "search_query"] = "search_query"
