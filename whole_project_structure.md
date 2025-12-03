@@ -1,47 +1,23 @@
 # Project Structure
 
 ```
+./
+├── app.py
+├── config.py
+├── embeddings/
+│   └── embed_service.py
+├── exports.md
+├── .gitignore
+├── llm/
+│   └── llm_service.py
+├── requirements.txt
+├── schemas.py
+└── utils.py
+
+2 directories, 9 files
 ```
 
 # File Contents
----
-File: safety/safety.py
----
-
-```py
-import config
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
-
-
-SAFETY_MODEL = "meta-llama/Llama-Guard-3-8B"
-
-guard_tokenizer = AutoTokenizer.from_pretrained(SAFETY_MODEL)
-guard_model = AutoModelForCausalLM.from_pretrained(
-    SAFETY_MODEL,
-    torch_dtype=torch.float16,
-    device_map="auto"
-)
-
-def run_safety_check(text: str):
-    inputs = guard_tokenizer(text, return_tensors="pt").to(guard_model.device)
-
-    with torch.no_grad():
-        output = guard_model.generate(
-            **inputs,
-            max_new_tokens=60
-        )
-
-    result = guard_tokenizer.decode(output[0], skip_special_tokens=True)
-    return result
-
-def is_unsafe(text: str) -> bool:
-    txt = text.lower()
-    return ("unsafe" in txt) or ("disallowed" in txt)
-
-
-```
-
 ---
 File: exports.md
 ---
@@ -152,30 +128,57 @@ File: app.py
 ---
 
 ```py
-import config  # loads HF token
+import config
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
+
 from schemas import PromptRequest, EmbedRequest
-from llm.llm_service import generate_llm_response
-from embeddings.embed_service import get_embedding
+from embeddings.embed_service import EmbeddingService
+# REMOVED: from safety.safety import SafetyService
+from llm.llm_service import LLMService
 
+# Global Model Holders
+models = {}
 
-app = FastAPI(title="GenAI API", version="1.0", root_path="/genaiapi")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        # Load models on startup
+        # REMOVED: models["safety"] = SafetyService()
+        
+        # Initialize LLMService without the safety dependency
+        models["llm"] = LLMService() 
+        models["embed"] = EmbeddingService()
+        
+        print("✅ All models loaded successfully.")
+        yield
+    except Exception as e:
+        print(f"❌ Failed to load models: {e}")
+        raise e
+    finally:
+        models.clear()
 
+app = FastAPI(title="GenAI API", version="1.0", root_path="/genaiapi", lifespan=lifespan)
 
 # -----------------------------
 # TEXT GENERATION ENDPOINT
 # -----------------------------
 @app.post("/generate/")
-async def generate_text(request: PromptRequest):
+def generate_text(request: PromptRequest):
+    llm_svc = models.get("llm")
+    if not llm_svc:
+        raise HTTPException(status_code=503, detail="LLM service not initialized")
+
     try:
-        result = generate_llm_response(
+        result = llm_svc.generate(
             prompt=request.prompt,
-            system_prompt=request.system_prompt,
             max_tokens=request.max_tokens,
             temperature=request.temperature,
             top_p=request.top_p,
         )
 
+        # Removed the "if 'error' in result" check since the safety check is gone
         return result
 
     except Exception as e:
@@ -186,19 +189,27 @@ async def generate_text(request: PromptRequest):
 # EMBEDDING ENDPOINT
 # -----------------------------
 @app.post("/embed/")
-async def embed_text(req: EmbedRequest):
+def embed_text(req: EmbedRequest):
+    embed_svc = models.get("embed")
+    if not embed_svc:
+        raise HTTPException(status_code=503, detail="Embedding service not initialized")
+
     try:
-        emb = get_embedding(req.text)
+        # Generate embedding (Fixed at 768 dims)
+        emb = embed_svc.generate(
+            text=req.text,
+            task_type=req.task_type
+        )
 
         return {
             "model": "nomic-ai/nomic-embed-text-v1.5",
-            "embedding_dimension": len(emb),
+            "task_type": req.task_type,
+            "embedding_dimension": 768, 
             "embedding": emb
         }
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 ```
 
 ---
@@ -206,7 +217,8 @@ File: schemas.py
 ---
 
 ```py
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Literal
 
 class PromptRequest(BaseModel):
     prompt: str
@@ -215,10 +227,12 @@ class PromptRequest(BaseModel):
     top_p: float = 0.9
     system_prompt: str | None = None
 
-
 class EmbedRequest(BaseModel):
-    text: str
-
+    text: str = Field(..., min_length=1)
+    
+    # "search_query" = Use this for your short/messy user questions
+    # "search_document" = Use this when saving clean text to your DB
+    task_type: Literal["search_document", "search_query"] = "search_query"
 ```
 
 ---
@@ -227,33 +241,34 @@ File: embeddings/embed_service.py
 
 ```py
 import torch
-from transformers import AutoTokenizer, AutoModel
+# Make sure you installed this: pip install sentence-transformers
+from sentence_transformers import SentenceTransformer
 
-NOMIC_MODEL = "nomic-ai/nomic-embed-text-v1.5"
+class EmbeddingService:
+    def __init__(self, model_id: str = "nomic-ai/nomic-embed-text-v1.5"):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Loading SentenceTransformer on {self.device}...")
+        
+        # trust_remote_code=True is required for Nomic
+        self.model = SentenceTransformer(model_id, trust_remote_code=True, device=self.device)
 
-embed_tokenizer = AutoTokenizer.from_pretrained(NOMIC_MODEL, trust_remote_code=True)
-embed_model = AutoModel.from_pretrained(NOMIC_MODEL, trust_remote_code=True)
+        self.prompts = {
+            "search_query": "search_query: ",
+            "search_document": "search_document: "
+        }
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-embed_model.to(device)
-embed_model.eval()
+    def generate(self, text: str, task_type: str = "search_query"):
+        prefix = self.prompts.get(task_type, "search_query: ")
+        text_with_prefix = prefix + text
 
+        # This handles tokenization, pooling, and normalization automatically
+        embedding = self.model.encode(
+            text_with_prefix, 
+            convert_to_tensor=False,
+            normalize_embeddings=True 
+        )
 
-def get_embedding(text: str):
-    inputs = embed_tokenizer(
-        text,
-        return_tensors="pt",
-        truncation=True,
-        padding=True,
-        max_length=8192
-    ).to(device)
-
-    with torch.no_grad():
-        outputs = embed_model(**inputs)
-
-    embedding = outputs.last_hidden_state.mean(dim=1)[0]
-    return embedding.cpu().tolist()
-
+        return embedding.tolist()
 ```
 
 ---
@@ -263,47 +278,36 @@ File: llm/llm_service.py
 ```py
 from vllm import LLM, SamplingParams
 from utils import build_prompt
-from safety.safety import run_safety_check, is_unsafe
 
-# Load LLaMA-3 using vLLM
-llm = LLM(
-    model="meta-llama/Meta-Llama-3-8B-Instruct",
-    gpu_memory_utilization=0.5, 
-    max_model_len=4096  # Limit context length to save VRAM (Llama 3 supports 8k, but that eats memory)
-)
+class LLMService:
+    def __init__(self):
+        print("Loading vLLM Engine (Llama 3.1)...")
+        # Updated to Llama 3.1
+        self.llm = LLM(
+            model="meta-llama/Llama-3.1-8B-Instruct",
+            gpu_memory_utilization=0.8, # Increased utilization since safety model is gone
+            max_model_len=8192,         # Llama 3.1 supports up to 128k, but 8192 is safe for vLLM VRAM
+            trust_remote_code=True
+        )
 
+    def generate(self, prompt: str, max_tokens: int, temperature: float, top_p: float):
+        # 1. Build Prompt
+        # full_prompt = build_prompt(prompt, system_prompt)
 
-def generate_llm_response(prompt: str, system_prompt: str, max_tokens: int, temperature: float, top_p: float):
-    
-    # Pre-safety check
-    safety_in = run_safety_check(prompt)
-    if is_unsafe(safety_in):
-        return {"error": "User input violates safety policies.", "safety": safety_in}
+        params = SamplingParams(
+            max_tokens=max_tokens,
+            temperature=temperature,
+            top_p=top_p,
+        )
 
-    # Build Llama prompt
-    full_prompt = build_prompt(prompt, system_prompt)
+        # 2. Generate
+        outputs = self.llm.generate([prompt], params)
+        generated_text = outputs[0].outputs[0].text.strip()
 
-    params = SamplingParams(
-        max_tokens=max_tokens,
-        temperature=temperature,
-        top_p=top_p,
-    )
-
-    # Generate output
-    outputs = llm.generate([full_prompt], params)
-    generated_text = outputs[0].outputs[0].text.strip()
-
-    # Post-safety check
-    safety_out = run_safety_check(generated_text)
-    if is_unsafe(safety_out):
-        return {"error": "Generated output violates safety policies.", "safety": safety_out}
-
-    return {
-        "generated_text": generated_text,
-        "input_safety": safety_in,
-        "output_safety": safety_out
-    }
-
+        return {
+            "generated_text": generated_text,
+            "finish_reason": outputs[0].outputs[0].finish_reason
+        }
 ```
 
 ---

@@ -1,11 +1,9 @@
 import config
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
 from schemas import PromptRequest, EmbedRequest
 from embeddings.embed_service import EmbeddingService
-from safety.safety import SafetyService
 from llm.llm_service import LLMService
 
 # Global Model Holders
@@ -15,9 +13,7 @@ models = {}
 async def lifespan(app: FastAPI):
     try:
         # Load models on startup
-        # Note: Ensure you have enough VRAM for all three!
-        models["safety"] = SafetyService()
-        models["llm"] = LLMService(safety_service=models["safety"])
+        models["llm"] = LLMService() 
         models["embed"] = EmbeddingService()
         
         print("✅ All models loaded successfully.")
@@ -40,16 +36,13 @@ def generate_text(request: PromptRequest):
         raise HTTPException(status_code=503, detail="LLM service not initialized")
 
     try:
+        # Pass prompt directly; system_prompt logic is removed
         result = llm_svc.generate(
             prompt=request.prompt,
-            system_prompt=request.system_prompt,
             max_tokens=request.max_tokens,
             temperature=request.temperature,
             top_p=request.top_p,
         )
-
-        if "error" in result:
-            return JSONResponse(status_code=400, content=result)
 
         return result
 
@@ -67,7 +60,6 @@ def embed_text(req: EmbedRequest):
         raise HTTPException(status_code=503, detail="Embedding service not initialized")
 
     try:
-        # Generate embedding (Fixed at 768 dims)
         emb = embed_svc.generate(
             text=req.text,
             task_type=req.task_type
