@@ -27,6 +27,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="GenAI API", version="1.0", root_path="/genaiapi", lifespan=lifespan)
 
 # -----------------------------
+# ADD CORS MIDDLEWARE HERE
+# -----------------------------
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],        # Allow all origins
+    allow_credentials=True,
+    allow_methods=["*"],        # Allow all HTTP methods
+    allow_headers=["*"],        # Allow all headers
+)
+
+
+# -----------------------------
 # TEXT GENERATION ENDPOINT
 # -----------------------------
 @app.post("/generate/")
@@ -36,7 +50,6 @@ def generate_text(request: PromptRequest):
         raise HTTPException(status_code=503, detail="LLM service not initialized")
 
     try:
-        # Pass prompt directly; system_prompt logic is removed
         result = llm_svc.generate(
             prompt=request.prompt,
             max_tokens=request.max_tokens,
@@ -68,9 +81,10 @@ def embed_text(req: EmbedRequest):
         return {
             "model": "nomic-ai/nomic-embed-text-v1.5",
             "task_type": req.task_type,
-            "embedding_dimension": 768, 
+            "embedding_dimension": 768,
             "embedding": emb
         }
 
     except Exception as e:
+        print("embedding error: ", e)
         raise HTTPException(status_code=500, detail=str(e))
